@@ -8,6 +8,20 @@
 这里采用的模式是如果一个代理是可用的, 那么下次尽可能将这个代理放到优先级队列的尾部, 也就是说, 尽量让一个代理在一个网站上使用的间隔最大.
 
 
+具体用法参考见这个大佬的(代理插件)[https://github.com/TeamHG-Memex/scrapy-rotating-proxies]
+
+在settings.py文件中编辑
+
+```python
+DOWNLOADER_MIDDLEWARES = {
+    # ...
+    'rotating_proxies.middlewares.RotatingProxyMiddleware': 610,
+    'rotating_proxies.middlewares.BanDetectionMiddleware': 620,
+    # ...
+}
+```
+
+
 每个spider需要实现下面两个方法, 用来确定哪些页面是被ban掉的:
 
 ```python
