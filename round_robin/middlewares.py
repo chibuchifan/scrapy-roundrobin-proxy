@@ -68,8 +68,10 @@ class RoundRobinProxyiddleware:
                 logger.warning("No proxies available; marking all proxies "
                                "as unchecked")
                 from twisted.internet.defer import DeferredLock
-                with DeferredLock():
-                    self.proxies.reset()
+                lock = DeferredLock()
+                lock.acquire()
+                self.proxies.reset()
+                lock.release()
                 proxy = self.proxies.get_proxy()
                 if proxy is None:
                     logger.error("No proxies available even after a reset.")
@@ -97,12 +99,8 @@ class RoundRobinProxyiddleware:
             return None
 
     def _retry(self, request, spider):
-        retries = request.meta.get('proxy_retry_times', 0) + 1
-        max_proxies_to_try = request.meta.get('max_proxies_to_try',
-                                              self.max_proxies_to_try)
         # 这里也就是说, 这个代理不能用了, 或者说这个代理需要一个较长时间之后才能用, 但是在取出代理的时候会阻塞,
         retryreq = request.copy()
-        retryreq.meta['proxy_retry_times'] = retries
         retryreq.dont_filter = True
         retryreq.priority = 1  # 扔到一个比较低的优先级队列中
         return retryreq
@@ -129,15 +127,82 @@ class RoundRobinProxyiddleware:
 
 
 class BanDetectionMiddleware(object):
+    """
+    Downloader middleware for detecting bans. It adds
+    '_ban': True to request.meta if the response was a ban.
+    To enable it, add it to DOWNLOADER_MIDDLEWARES option::
+        DOWNLOADER_MIDDLEWARES = {
+            # ...
+            'rotating_proxies.middlewares.BanDetectionMiddleware': 620,
+            # ...
+        }
+    By default, client is considered banned if a request failed, and alive
+    if a response was received. You can override ban detection method by
+    passing a path to a custom BanDectionPolicy in
+    ``ROTATING_PROXY_BAN_POLICY``, e.g.::
+
+    ROTATING_PROXY_BAN_POLICY = 'myproject.policy.MyBanPolicy'
+
+    The policy must be a class with ``response_is_ban``
+    and ``exception_is_ban`` methods. These methods can return True
+    (ban detected), False (not a ban) or None (unknown). It can be convenient
+    to subclass and modify default BanDetectionPolicy::
+
+        # myproject/policy.py
+        from rotating_proxies.policy import BanDetectionPolicy
+
+        class MyPolicy(BanDetectionPolicy):
+            def response_is_ban(self, request, response):
+                # use default rules, but also consider HTTP 200 responses
+                # a ban if there is 'captcha' word in response body.
+                ban = super(MyPolicy, self).response_is_ban(request, response)
+                ban = ban or b'captcha' in response.body
+                return ban
+
+            def exception_is_ban(self, request, exception):
+                # override method completely: don't take exceptions in account
+                return None
+
+    Instead of creating a policy you can also implement ``response_is_ban``
+    and ``exception_is_ban`` methods as spider methods, for example::
+        class MySpider(scrapy.Spider):
+            # ...
+            def response_is_ban(self, request, response):
+                return b'banned' in response.body
+            def exception_is_ban(self, request, exception):
+                return None
+
+    """
+
+    def __init__(self, stats, policy):
+        # self.stats = stats
+        self.policy = policy
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        return cls(cls._load_policy(crawler))
+
+    @classmethod
+    def _load_policy(cls, crawler):
+        policy_path = crawler.settings.get(
+            'ROTATING_PROXY_BAN_POLICY',
+            'round_robin.policy.BanDetectionPolicy'
+        )
+        policy_cls = load_object(policy_path)
+        if hasattr(policy_cls, 'from_crawler'):
+            return policy_cls.from_crawler(crawler)
+        else:
+            return policy_cls()
 
     def process_response(self, request, response, spider):
-        # 这里自己添加403?
-        is_ban = getattr(spider, 'response_is_ban')
+        is_ban = getattr(spider, 'response_is_ban',
+                         self.policy.response_is_ban)
         ban = is_ban(request, response)
         request.meta['_ban'] = ban
         return response
 
     def process_exception(self, request, exception, spider):
-        is_ban = getattr(spider, 'exception_is_ban')
+        is_ban = getattr(spider, 'exception_is_ban',
+                         self.policy.exception_is_ban)
         ban = is_ban(request, exception)
         request.meta['_ban'] = ban
